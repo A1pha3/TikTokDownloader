@@ -49,6 +49,7 @@ from ..module import DetailTikTokExtractor, DetailTikTokUnofficial
 from ..storage import RecordManager
 from ..tools import DownloaderError, choose, safe_pop
 from ..translation import _
+from .main_scheduler import ScheduledDownloader
 
 if TYPE_CHECKING:
     from pydantic import BaseModel
@@ -130,7 +131,13 @@ class TikTok:
             "mark" in parameter.name_format,
             "nickname" in parameter.name_format,
         )
+        # 初始化定时下载器
+        self.scheduler = ScheduledDownloader(parameter, self.database)
         self.__function = (
+            (
+                _("自动批量下载账号作品(抖音)"),
+                self.auto_download_interactive,
+            ),
             (
                 _("批量下载账号作品(抖音)"),
                 self.account_acquisition_interactive,
@@ -266,6 +273,108 @@ class TikTok:
                 self._search_interactive_live,
             ),
         )
+
+    async def auto_download_interactive(self, select=""):
+        """自动批量下载账号作品交互菜单"""
+        self.console.print(_("自动批量下载账号作品(抖音)"), style="bold blue")
+        self.console.print(_("该功能将在每天凌晨2点、中午12点、下午7点自动执行下载任务"), style="cyan")
+        
+        if self.scheduler.running:
+            self.console.print(_("定时下载器当前状态:"), style="yellow")
+            self.console.print(self.scheduler.get_status())
+            
+            choice = choose(
+                _("请选择操作"),
+                [
+                    _("停止定时下载"),
+                    _("查看状态"),
+                    _("设置自定义时间"),
+                    _("返回主菜单"),
+                ],
+                self.console,
+            )
+            
+            if choice == "1":
+                self.scheduler.stop_scheduler()
+            elif choice == "2":
+                self.console.print(self.scheduler.get_status())
+                input(_("按回车键继续..."))
+            elif choice == "3":
+                await self._set_custom_schedule_times()
+            # choice == "4" 或其他情况直接返回
+        else:
+            choice = choose(
+                _("请选择操作"),
+                [
+                    _("启动定时下载"),
+                    _("设置自定义时间"),
+                    _("返回主菜单"),
+                ],
+                self.console,
+            )
+            
+            if choice == "1":
+                if not self.parameter.accounts_urls:
+                    self.console.warning(_("请先在配置文件中设置 accounts_urls 参数！"))
+                    input(_("按回车键继续..."))
+                    return
+                self.scheduler.start_scheduler()
+                self.console.print(_("定时下载器已启动！"), style="green")
+                input(_("按回车键继续..."))
+            elif choice == "2":
+                await self._set_custom_schedule_times()
+            # choice == "3" 或其他情况直接返回
+    
+    async def _set_custom_schedule_times(self):
+        """设置自定义执行时间"""
+        self.console.print(_("当前执行时间: {times}").format(
+            times=", ".join([f"{h:02d}:{m:02d}" for h, m in self.scheduler.schedule_times])
+        ))
+        
+        choice = choose(
+            _("请选择操作"),
+            [
+                _("添加新时间"),
+                _("移除时间"),
+                _("重置为默认时间"),
+                _("返回"),
+            ],
+            self.console,
+        )
+        
+        if choice == "1":
+            try:
+                time_input = input(_("请输入时间(格式: HH:MM): ")).strip()
+                if ":" not in time_input:
+                    self.console.warning(_("时间格式错误！"))
+                    return
+                
+                hour, minute = map(int, time_input.split(":"))
+                self.scheduler.add_custom_time(hour, minute)
+            except ValueError:
+                self.console.warning(_("时间格式错误！请输入正确的时间格式(HH:MM)"))
+        elif choice == "2":
+            if not self.scheduler.schedule_times:
+                self.console.warning(_("没有可移除的时间！"))
+                return
+                
+            time_choices = [f"{h:02d}:{m:02d}" for h, m in self.scheduler.schedule_times]
+            time_choice = choose(
+                _("请选择要移除的时间"),
+                time_choices,
+                self.console,
+            )
+            
+            if time_choice.isdigit():
+                index = int(time_choice) - 1
+                if 0 <= index < len(self.scheduler.schedule_times):
+                    hour, minute = self.scheduler.schedule_times[index]
+                    self.scheduler.remove_custom_time(hour, minute)
+        elif choice == "3":
+            self.scheduler.set_custom_times([(2, 0), (12, 0), (19, 0)])
+            self.console.print(_("已重置为默认时间: 02:00, 12:00, 19:00"), style="green")
+        
+        input(_("按回车键继续..."))
 
     def _inquire_input(
         self,
@@ -798,32 +907,30 @@ class TikTok:
     def _generate_prefix(
         mode: str,
     ):
-        match mode:
-            case "post" | "favorite" | "collection":
-                return "UID"
-            case "mix":
-                return "MID"
-            case "collects":
-                return "CID"
-            case _:
-                raise DownloaderError
+        if mode in ("post", "favorite", "collection"):
+            return "UID"
+        elif mode == "mix":
+            return "MID"
+        elif mode == "collects":
+            return "CID"
+        else:
+            raise DownloaderError
 
     @staticmethod
     def _generate_suffix(
         mode: str,
     ):
-        match mode:
-            case "post":
-                return _("发布作品")
-            case "favorite":
-                return _("喜欢作品")
-            case "collection":
-                return _("收藏作品")
-            case "mix":
-                return _("合集作品")
-            case "collects":
-                return _("收藏夹作品")
-            case _:
+        if mode == "post":
+            return _("发布作品")
+        elif mode == "favorite":
+            return _("喜欢作品")
+        elif mode == "collection":
+            return _("收藏作品")
+        elif mode == "mix":
+            return _("合集作品")
+        elif mode == "collects":
+            return _("收藏夹作品")
+        else:
                 raise DownloaderError
 
     def __display_extracted_information(
@@ -1701,15 +1808,14 @@ class TikTok:
         url: str,
         tiktok: bool,
     ) -> tuple[bool, str, str]:
-        match tiktok:
-            case True:
-                _, ids, title = await self.links_tiktok.run(url, type_="mix")
-                return (True, ids[0], title[0]) if len(ids) > 0 else (None, "", "")
-            case False:
-                mix_id, ids = await self.links.run(url, type_="mix")
-                return (mix_id, ids[0], "") if len(ids) > 0 else (mix_id, "", "")
-            case _:
-                raise DownloaderError
+        if tiktok is True:
+            _, ids, title = await self.links_tiktok.run(url, type_="mix")
+            return (True, ids[0], title[0]) if len(ids) > 0 else (None, "", "")
+        elif tiktok is False:
+            mix_id, ids = await self.links.run(url, type_="mix")
+            return (mix_id, ids[0], "") if len(ids) > 0 else (mix_id, "", "")
+        else:
+            raise DownloaderError
 
     async def user_batch(
         self,
@@ -1865,40 +1971,39 @@ class TikTok:
         douyin_user_type: int = 0,
     ) -> Union["BaseModel", str]:
         try:
-            match channel:
-                case 0:
-                    return GeneralSearch(
-                        keyword=keyword,
-                        pages=pages,
-                        sort_type=sort_type,
-                        publish_time=publish_time,
-                        duration=duration,
-                        search_range=search_range,
-                        content_type=content_type,
-                    )
-                case 1:
-                    return VideoSearch(
-                        keyword=keyword,
-                        pages=pages,
-                        sort_type=sort_type,
-                        publish_time=publish_time,
-                        duration=duration,
-                        search_range=search_range,
-                    )
-                case 2:
-                    return UserSearch(
-                        keyword=keyword,
-                        pages=pages,
-                        douyin_user_fans=douyin_user_fans,
-                        douyin_user_type=douyin_user_type,
-                    )
-                case 3:
-                    return LiveSearch(
-                        keyword=keyword,
-                        pages=pages,
-                    )
-                case _:
-                    raise DownloaderError
+            if channel == 0:
+                return GeneralSearch(
+                    keyword=keyword,
+                    pages=pages,
+                    sort_type=sort_type,
+                    publish_time=publish_time,
+                    duration=duration,
+                    search_range=search_range,
+                    content_type=content_type,
+                )
+            elif channel == 1:
+                return VideoSearch(
+                    keyword=keyword,
+                    pages=pages,
+                    sort_type=sort_type,
+                    publish_time=publish_time,
+                    duration=duration,
+                    search_range=search_range,
+                )
+            elif channel == 2:
+                return UserSearch(
+                    keyword=keyword,
+                    pages=pages,
+                    douyin_user_fans=douyin_user_fans,
+                    douyin_user_type=douyin_user_type,
+                )
+            elif channel == 3:
+                return LiveSearch(
+                    keyword=keyword,
+                    pages=pages,
+                )
+            else:
+                raise DownloaderError
         except ValidationError as e:
             return repr(e)
 
@@ -1950,40 +2055,39 @@ class TikTok:
             f"{datetime.now():%Y_%m_%d_%H_%M_%S}",
             Search.search_params[model.channel].note,
         ]
-        match model.channel:
-            case 0:
-                name.extend(
-                    [
-                        model.keyword,
-                        Search.sort_type_help[model.sort_type],
-                        Search.publish_time_help[model.publish_time],
-                        Search.duration_help[model.duration],
-                        Search.search_range_help[model.search_range],
-                        Search.content_type_help[model.content_type],
-                    ]
-                )
-            case 1:
-                name.extend(
-                    [
-                        model.keyword,
-                        Search.sort_type_help[model.sort_type],
-                        Search.publish_time_help[model.publish_time],
-                        Search.duration_help[model.duration],
-                        Search.search_range_help[model.search_range],
-                    ]
-                )
-            case 2:
-                name.extend(
-                    [
-                        model.keyword,
-                        Search.douyin_user_fans_help[model.douyin_user_fans],
-                        Search.douyin_user_type_help[model.douyin_user_type],
-                    ]
-                )
-            case 3:
-                name.append(
+        if model.channel == 0:
+            name.extend(
+                [
                     model.keyword,
-                )
+                    Search.sort_type_help[model.sort_type],
+                    Search.publish_time_help[model.publish_time],
+                    Search.duration_help[model.duration],
+                    Search.search_range_help[model.search_range],
+                    Search.content_type_help[model.content_type],
+                ]
+            )
+        elif model.channel == 1:
+            name.extend(
+                [
+                    model.keyword,
+                    Search.sort_type_help[model.sort_type],
+                    Search.publish_time_help[model.publish_time],
+                    Search.duration_help[model.duration],
+                    Search.search_range_help[model.search_range],
+                ]
+            )
+        elif model.channel == 2:
+            name.extend(
+                [
+                    model.keyword,
+                    Search.douyin_user_fans_help[model.douyin_user_fans],
+                    Search.douyin_user_type_help[model.douyin_user_type],
+                ]
+            )
+        elif model.channel == 3:
+            name.append(
+                model.keyword,
+            )
         return "_".join(name)
 
     async def deal_search_data(
@@ -2289,9 +2393,9 @@ class TikTok:
             if not (select := safe_pop(self.run_command)):
                 select = choose(
                     _("请选择采集功能"),
-                    [i for i, __ in self.__function],
+                    [i[0] for i in self.__function],
                     self.console,
-                    (11,),
+                    (12,),  # 更新退出选项位置
                 )
             if select in {
                 "Q",
@@ -2299,7 +2403,7 @@ class TikTok:
             }:
                 self.running = False
             try:
-                n = int(select) - 1
+                n = int(select) - 1  # choose函数从1开始编号，所以减1
             except ValueError:
                 break
             if n in range(len(self.__function)):

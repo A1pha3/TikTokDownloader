@@ -38,6 +38,7 @@ from src.translation import _, switch_language
 
 from .main_server import APIServer
 from .main_terminal import TikTok
+from .main_scheduler import ScheduledDownloader
 
 # from typing import Type
 # from webbrowser import open
@@ -71,6 +72,7 @@ class TikTokDownloader:
         self.config = None
         self.option = None
         self.__function_menu = None
+        self.scheduler = None
 
     @staticmethod
     def rename_compatible():
@@ -126,6 +128,7 @@ class TikTokDownloader:
                 _("{}运行日志记录").format(options[self.config["Logger"]]),
                 self.__modify_logging,
             ),
+            (_("定时下载管理"), self.scheduler_interactive),
             (_("检查程序版本更新"), self.check_update),
             (_("切换语言"), self._switch_language),
         )
@@ -387,6 +390,8 @@ class TikTokDownloader:
         if not restart:
             self.run_command = self.parameter.run_command.copy()
         self.parameter.CLEANER.set_rule(TEXT_REPLACEMENT, True)
+        if not self.scheduler:
+            self.scheduler = ScheduledDownloader(self.parameter, self.database)
 
     async def run(self):
         self.project_info()
@@ -394,8 +399,13 @@ class TikTokDownloader:
         await self.check_settings(
             False,
         )
-        if await self.disclaimer():
-            await self.main_menu(safe_pop(self.run_command))
+        try:
+            if await self.disclaimer():
+                await self.main_menu(safe_pop(self.run_command))
+        finally:
+            # 确保在程序退出时停止定时器
+            if self.scheduler:
+                self.scheduler.stop_scheduler()
 
     def periodic_update_params(self):
         async def inner():
@@ -443,3 +453,67 @@ class TikTokDownloader:
             select=safe_pop(self.run_command),
         ):
             await self.check_settings()
+
+    async def scheduler_interactive(self):
+        """定时下载交互菜单"""
+        scheduler_menu = (
+            (_("启动定时下载任务"), self.start_scheduler),
+            (_("停止定时下载任务"), self.stop_scheduler),
+            (_("查看定时任务状态"), self.check_scheduler_status),
+            (_("设置自定义执行时间"), self.set_custom_schedule_time),
+        )
+        
+        while self.running:
+            select = choose(
+                _("定时下载管理"),
+                [i for i, __ in scheduler_menu],
+                self.console,
+            )
+            if select in {"Q", "q", ""}:
+                break
+            try:
+                n = int(select) - 1
+            except ValueError:
+                continue
+            if n in range(len(scheduler_menu)):
+                await scheduler_menu[n][1]()
+
+    async def start_scheduler(self):
+        """启动定时下载任务"""
+        if not self.scheduler:
+            self.console.warning(_("定时下载器未初始化！"))
+            return
+        self.scheduler.start_scheduler()
+
+    async def stop_scheduler(self):
+        """停止定时下载任务"""
+        if not self.scheduler:
+            self.console.warning(_("定时下载器未初始化！"))
+            return
+        self.scheduler.stop_scheduler()
+
+    async def check_scheduler_status(self):
+        """查看定时任务状态"""
+        if not self.scheduler:
+            self.console.warning(_("定时下载器未初始化！"))
+            return
+        status = self.scheduler.get_status()
+        self.console.print(status, style="blue")
+
+    async def set_custom_schedule_time(self):
+        """设置自定义执行时间"""
+        if not self.scheduler:
+            self.console.warning(_("定时下载器未初始化！"))
+            return
+            
+        try:
+            time_input = self.console.input(_("请输入执行时间(格式: HH:MM，如 02:00): "))
+            if not time_input.strip():
+                return
+                
+            hour, minute = map(int, time_input.split(":"))
+            self.scheduler.set_custom_time(hour, minute)
+        except ValueError:
+            self.console.warning(_("时间格式错误！请使用 HH:MM 格式，如 02:00"))
+        except Exception as e:
+            self.console.warning(_("设置时间失败: {error}").format(error=str(e)))

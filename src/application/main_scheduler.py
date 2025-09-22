@@ -24,8 +24,8 @@ class ScheduledDownloader:
         self.scheduler = AsyncIOScheduler()
         self.running = False
         
-        # 默认执行时间：凌晨2点、中午12点、下午7点
-        self.schedule_times = [(2, 0), (12, 0), (19, 0)]
+        # 尝试从配置文件读取时间设置
+        self.schedule_times = self._load_schedule_config()
         
     def start_scheduler(self):
         """启动定时下载器"""
@@ -185,6 +185,64 @@ class ScheduledDownloader:
         else:
             self.console.warning(_("该时间点不存在: {time}").format(time=f"{hour:02d}:{minute:02d}"))
             
+    def _load_schedule_config(self):
+        """从TOML配置文件加载时间设置"""
+        try:
+            from pathlib import Path
+            
+            # 获取项目根目录下config目录的schedule.toml文件
+            config_file = Path(__file__).parent.parent.parent / "config" / "schedule.toml"
+            
+            if config_file.exists():
+                # 使用Python内置的tomllib读取TOML文件
+                try:
+                    import tomllib
+                except ImportError:
+                    # Python < 3.11 的兼容性处理
+                    try:
+                        import tomli as tomllib
+                    except ImportError:
+                        raise ImportError("需要安装tomli库来解析TOML文件: pip install tomli")
+                
+                with open(config_file, 'rb') as f:
+                    config = tomllib.load(f)
+                
+                if 'scheduler' in config and 'times' in config['scheduler']:
+                    time_strings = config['scheduler']['times']
+                    times = []
+                    
+                    # 解析时间字符串
+                    for time_str in time_strings:
+                        if ':' not in time_str:
+                            raise ValueError(f"时间格式错误: {time_str}，应为 HH:MM 格式")
+                        
+                        hour_str, minute_str = time_str.split(':')
+                        hour = int(hour_str)
+                        minute = int(minute_str)
+                        
+                        # 验证时间范围
+                        if not (0 <= hour <= 23):
+                            raise ValueError(f"小时超出范围: {hour}，应在0-23之间")
+                        if not (0 <= minute <= 59):
+                            raise ValueError(f"分钟超出范围: {minute}，应在0-59之间")
+                        
+                        times.append((hour, minute))
+                    
+                    if times:
+                        time_display = ', '.join([f'{h:02d}:{m:02d}' for h, m in times])
+                        self.console.print(f"已从TOML配置文件加载时间设置: {time_display}", style="green")
+                        return times
+                    else:
+                        raise ValueError("配置文件中没有找到有效的时间设置")
+                else:
+                    raise ValueError("配置文件格式错误，缺少scheduler.times配置")
+                    
+        except Exception as e:
+            self.console.warning(f"读取TOML配置文件失败，使用默认设置: {str(e)}")
+        
+        # 默认时间设置
+        return [(2, 0), (12, 0), (19, 0)]
+
     def set_custom_time(self, hour: int, minute: int = 0):
         """设置自定义执行时间（保持向后兼容）"""
         self.set_custom_times([(hour, minute)])
